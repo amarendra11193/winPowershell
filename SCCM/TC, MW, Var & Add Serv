@@ -1,0 +1,72 @@
+# This script creates a Temporary Collection using the Parent Collection.
+# This script then created a Maintenance Window for the Temporary Collection.
+# This scripts also links the Task Sequence to the temporary collection.
+# This script adds a server to the temporary collection
+
+Pram(
+[string]$siteServer, # the Server on which SCCM is installed
+[string]$collection, # Name of the parent collection
+[string]$serverName, # Name of the Device which is required to be added
+[string]$limitCollName, # The Limiting Collection Name
+[string]$tsPackageID, # Package ID of the Task Sequence
+[datetime]$desiredTime # Date & Time at which installation is required to be started
+)
+
+# Import ConfigurationManager module if it is not present on server from where script is executed
+If (!(Get-Module -Name "ConfigurationManager"))
+    {
+        Import-Module $env:SMS_ADMIN_UI_PATH.replace("bin\i386","bin\ConfigurationManager.psd1") -Force
+    }
+$siteCode = Get-WmiObject -ComputerName $siteServer -Namespace root\sms -Class SMS_ProviderLocation | Select-Object -Property sitecode -First 1
+$siteCode = $siteCode.sitecode
+
+# Setting Sitecode as $siteCode
+$siteCodeTemp = $siteCode + ":"
+try
+    {
+        Set-Location $siteCodeTemp
+    }
+catch [System.Exception]
+    {
+        Write-Host "@Error: Failed to set sitecode" -ForegroundColor Red
+        Exit 1
+    }
+
+# Creating a temp Collection & Adding the Server/Device to that collection.
+$currentTime = Get-Date
+$tempCollectionName = "$collection $currentTime $serverName"
+
+New-CMDeviceCollection -Name $tempCollectionName -LimitingCollectionName $limitCollName
+
+$tempVar = Get-CMDeviceDirectMembershipRule -CollectionName $tempCollectionName -ResourceName $serverName
+if ($null -eq $tempVar)
+    {
+        try
+        {
+            Add-CMDeviceDirectMembershipRule -CollectionName $tempCollectionName -ResourceId (Get-CMDevice -Name $serverName).ResourceId
+            Exit 0
+        }
+        catch 
+        {
+            Write-Host "Unable to add $serverName to $tempCollectionName"
+            Exit 1
+        }
+    }
+else
+    {
+        Write-Host "$serverName already part of $tempCollectionName"
+    }
+
+# Creating a Maintenance Window for the temporary collection & scheduling it for a given time.
+$maintenanceSchedule = New-CMSchedule -DurationCount 7 -DurationInterval Hours -NonRecurring -Start $desiredTime
+New-CMMaintenanceWindow -CollectionName $tempCollectionName -Name "$serverName Temp MW" -Scheule $maintenanceSchedule -ApplyTo TaskSequencesOnly
+
+# Adding required variables to the temporary collection as key-value pair
+$tempCollection = Get-CMCollection -Name $tempCollectionName
+New-CMDeviceCollectionVariable -Collection $tempCollection -VariableName "ABC" -Value "XYZ"
+
+# Add Task Sequnece Deployment to the temporary collection
+New-CMTaskSequenceDeployment -TaskSequencePackageID $tsPackageID -CollectionName $tempCollectionName -Comment "Custom Comments" -DeployPurpose Required -SendWakeUpPacket $True -UseMeteredNetwork $True -ScheduleEvent AsSoonAsPossible -RunFromSoftwareCenter $False -ShowTaskSequenceProgress $True -SoftwareInstallation $False -SystemRestart $False -PersistOnWriteFilterDevice $False -AllowFallback $True -DeploymentOption DownloadContentLocallyWhenNeededByRunningTaskSequence -AllowSharedContent $True -InternetOption $True
+
+# Output
+Write-Host "##tempCollectionName" "$tempCollectionName"
